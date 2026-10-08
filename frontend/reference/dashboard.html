@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ASTM E1876 NDT — Live Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+:root{--bg:#0a0e1a;--panel:#111827;--border:#1e2d45;--accent:#00d4ff;--green:#22c55e;--yellow:#facc15;--red:#ef4444;--orange:#f97316;--text:#e2e8f0;--muted:#64748b;--font:'Segoe UI',system-ui,sans-serif}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:100vh;overflow-x:hidden}
+header{display:flex;align-items:center;justify-content:space-between;padding:12px 24px;background:var(--panel);border-bottom:1px solid var(--border)}
+header h1{font-size:1.1rem;font-weight:700;letter-spacing:.04em;color:var(--accent)}
+header .subtitle{font-size:.72rem;color:var(--muted);margin-top:2px}
+#ws-status{display:flex;align-items:center;gap:8px;font-size:.75rem;font-weight:600}
+#ws-dot{width:10px;height:10px;border-radius:50%;background:var(--red);box-shadow:0 0 6px var(--red);transition:background .3s,box-shadow .3s}
+#ws-dot.connected{background:var(--green);box-shadow:0 0 8px var(--green)}
+#ws-dot.connecting{background:var(--yellow);box-shadow:0 0 8px var(--yellow);animation:blink .8s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+.grid{display:grid;grid-template-columns:260px 1fr 280px;gap:12px;padding:14px;min-height:calc(100vh - 57px)}
+.panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px;position:relative;overflow:hidden}
+.panel-title{font-size:.67rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-bottom:12px;display:flex;align-items:center;gap:6px}
+.panel-title::before{content:'';display:inline-block;width:3px;height:12px;border-radius:2px;background:var(--accent)}
+.col-left{grid-column:1;grid-row:1/4;display:flex;flex-direction:column;gap:12px}
+#verdict-card{text-align:center;padding:20px 14px;border-radius:10px;border:1px solid var(--border);background:var(--panel);transition:border-color .4s,box-shadow .4s}
+#verdict-label{font-size:1.9rem;font-weight:900;letter-spacing:.06em;text-shadow:0 0 20px currentColor;transition:color .3s}
+#verdict-sub{font-size:.72rem;color:var(--muted);margin-top:4px}
+.states{display:flex;flex-direction:column;gap:6px}
+.state-item{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:7px;border:1px solid transparent;font-size:.78rem;font-weight:600;transition:all .25s;color:var(--muted)}
+.state-item.active{background:#0f2333;border-color:var(--accent);color:var(--accent);box-shadow:0 0 8px #00d4ff44}
+.state-dot{width:8px;height:8px;border-radius:50%;background:var(--border);flex-shrink:0;transition:background .25s,box-shadow .25s}
+.state-item.active .state-dot{background:var(--accent);box-shadow:0 0 6px var(--accent)}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.metric{background:#0d1520;border:1px solid var(--border);border-radius:8px;padding:10px}
+.metric-label{font-size:.62rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+.metric-value{font-size:1.18rem;font-weight:800;color:var(--accent);margin-top:3px;font-variant-numeric:tabular-nums}
+.metric-unit{font-size:.65rem;color:var(--muted)}
+#pers-bar-wrap{margin-top:6px}
+.pers-label{font-size:.7rem;color:var(--muted);margin-bottom:5px;display:flex;justify-content:space-between}
+.pers-track{height:8px;background:#1e2d45;border-radius:4px;overflow:hidden}
+.pers-fill{height:100%;width:0%;border-radius:4px;background:var(--red);transition:width .4s,background .4s}
+#cal-card{display:none}
+.cal-pip-row{display:flex;gap:5px;margin-top:8px}
+.cal-pip{flex:1;height:16px;border-radius:4px;background:var(--border);transition:background .25s}
+.cal-pip.done{background:var(--green)}
+.cal-pip.active{background:var(--yellow);animation:blink .6s infinite}
+.col-center{grid-column:2;grid-row:1/4;display:flex;flex-direction:column;gap:12px}
+.chart-wrap{position:relative;height:190px}
+.col-right{grid-column:3;grid-row:1/4;display:flex;flex-direction:column;gap:12px}
+#log-box{flex:1;background:#070c14;border:1px solid var(--border);border-radius:8px;padding:10px;font-family:'Cascadia Code','Courier New',monospace;font-size:.64rem;line-height:1.65;overflow-y:auto;max-height:460px;word-break:break-all}
+.log-line{color:#94a3b8}
+.log-line.ev-state{color:#60a5fa}
+.log-line.ev-verdict-HEALTHY{color:var(--green)}
+.log-line.ev-verdict-DEFECT{color:var(--red);font-weight:700}
+.log-line.ev-verdict-VERIFYING{color:var(--orange)}
+.log-line.ev-verdict-UNCERTAIN{color:var(--yellow)}
+.log-line.ev-cal{color:#a78bfa}
+.log-line.ev-peak{color:var(--accent)}
+#alarm-banner{display:none;background:#3f0000;border:2px solid var(--red);border-radius:10px;padding:14px 18px;text-align:center;animation:alarm-pulse .7s infinite alternate}
+#alarm-banner.active{display:block}
+@keyframes alarm-pulse{from{box-shadow:0 0 10px #ef444466;border-color:#ef4444}to{box-shadow:0 0 28px #ef4444cc;border-color:#ff6b6b}}
+#alarm-banner .alarm-title{font-size:1.2rem;font-weight:900;color:var(--red);letter-spacing:.1em}
+#alarm-banner .alarm-sub{font-size:.7rem;color:#fca5a5;margin-top:4px}
+#uptime-row{display:flex;gap:8px}
+.badge{padding:4px 10px;border-radius:20px;font-size:.65rem;font-weight:700;letter-spacing:.05em;background:#1e2d45;color:var(--muted)}
+.badge.live{background:#052e16;color:var(--green)}
+#history-table{width:100%;border-collapse:collapse;font-size:.68rem}
+#history-table th{color:var(--muted);font-weight:600;text-align:left;padding:4px 6px;border-bottom:1px solid var(--border)}
+#history-table td{padding:4px 6px;border-bottom:1px solid #131e2e}
+#history-table tr:last-child td{border-bottom:none}
+.verdict-chip{display:inline-block;padding:1px 7px;border-radius:10px;font-size:.6rem;font-weight:700;letter-spacing:.05em}
+.chip-HEALTHY{background:#052e16;color:var(--green)}
+.chip-DEFECT{background:#3f0000;color:var(--red)}
+.chip-VERIFYING{background:#431407;color:var(--orange)}
+.chip-UNCERTAIN{background:#3b2f00;color:var(--yellow)}
+.threshold-legend{display:flex;gap:14px;font-size:.68rem;padding:6px 0 0}
+.leg-item{display:flex;align-items:center;gap:5px}
+.leg-dot{width:10px;height:3px;border-radius:2px}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>&#9889; ASTM E1876 &mdash; Acoustic Resonance NDT Dashboard</h1>
+    <div class="subtitle">Real-time telemetry &amp; defect analytics &middot; ESP32 WROOM-32</div>
+  </div>
+  <div style="display:flex;align-items:center;gap:18px;">
+    <div id="uptime-row">
+      <span class="badge live" id="demo-badge" style="display:none;">DEMO</span>
+      <span class="badge" id="uptime-badge">Uptime: 0s</span>
+      <span class="badge" id="total-strikes">Strikes: 0</span>
+    </div>
+    <div id="ws-status">
+      <div id="ws-dot" class="connecting"></div>
+      <span id="ws-label">Connecting&hellip;</span>
+    </div>
+  </div>
+</header>
+<div class="grid">
+<div class="col-left">
+  <div id="verdict-card" class="panel">
+    <div class="panel-title">Current Verdict</div>
+    <div id="verdict-label" style="color:var(--muted)">WAITING</div>
+    <div id="verdict-sub">No measurement yet</div>
+  </div>
+  <div id="alarm-banner">
+    <div class="alarm-title">&#9888; STRUCTURAL DEFECT</div>
+    <div class="alarm-sub">Persistent flaw confirmed &mdash; inspect specimen immediately</div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">System State</div>
+    <div class="states" id="state-list">
+      <div class="state-item active" data-s="IDLE"><div class="state-dot"></div>IDLE</div>
+      <div class="state-item" data-s="TRIGGERED"><div class="state-dot"></div>TRIGGERED</div>
+      <div class="state-item" data-s="SENSING"><div class="state-dot"></div>SENSING</div>
+      <div class="state-item" data-s="EVALUATING"><div class="state-dot"></div>EVALUATING</div>
+      <div class="state-item" data-s="COOLDOWN"><div class="state-dot"></div>COOLDOWN</div>
+    </div>
+  </div>
+  <div class="panel" id="cal-card">
+    <div class="panel-title">Calibration Progress</div>
+    <div id="cal-status" style="font-size:.75rem;color:var(--yellow);">Collecting samples&hellip;</div>
+    <div class="cal-pip-row" id="cal-pips">
+      <div class="cal-pip" id="pip0"></div><div class="cal-pip" id="pip1"></div>
+      <div class="cal-pip" id="pip2"></div><div class="cal-pip" id="pip3"></div>
+      <div class="cal-pip" id="pip4"></div><div class="cal-pip" id="pip5"></div>
+      <div class="cal-pip" id="pip6"></div><div class="cal-pip" id="pip7"></div>
+    </div>
+    <div id="cal-freq-display" style="font-size:.72rem;color:var(--muted);margin-top:8px;"></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">Defect Persistence</div>
+    <div id="pers-bar-wrap">
+      <div class="pers-label"><span>Strike count</span><span id="pers-text">0 / 3</span></div>
+      <div class="pers-track"><div class="pers-fill" id="pers-fill"></div></div>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">Calibration Parameters</div>
+    <div class="metrics">
+      <div class="metric"><div class="metric-label">Baseline f&#8320;</div><div class="metric-value" id="m-f0">&mdash;</div><div class="metric-unit">Hz</div></div>
+      <div class="metric"><div class="metric-label">&#963; StdDev</div><div class="metric-value" id="m-std">&mdash;</div><div class="metric-unit">Hz</div></div>
+      <div class="metric"><div class="metric-label">T_LOW (3&#963;)</div><div class="metric-value" id="m-tlow">&mdash;</div><div class="metric-unit">Hz</div></div>
+      <div class="metric"><div class="metric-label">T_HIGH (Flaw)</div><div class="metric-value" id="m-thigh">&mdash;</div><div class="metric-unit">Hz drop</div></div>
+    </div>
+  </div>
+</div>
+

@@ -1,0 +1,19 @@
+# Local runtime and telemetry files
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+backend/data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+secrets.h
+
+# Editor / operating system files
+.DS_Store
+Thumbs.db

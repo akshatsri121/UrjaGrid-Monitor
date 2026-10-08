@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Microgrid History</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0c1522;color:#e5eef9;font:16px system-ui}main{max-width:1150px;margin:auto;padding:32px}h1{margin:0}p,small{color:#b1c2d8}header,.toolbar{display:flex;justify-content:space-between;gap:15px;align-items:center;flex-wrap:wrap}.toolbar{margin:24px 0}button,select,a.action{background:#213650;color:#fff;border:1px solid #49627e;border-radius:7px;padding:10px;font:inherit;cursor:pointer;text-decoration:none}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card,section{background:#142237;border:1px solid #2d425c;border-radius:12px;padding:18px}.card strong{display:block;font-size:26px;margin-top:8px}section{margin-top:20px}svg{width:100%;height:240px}textarea{width:100%;min-height:85px;font:inherit;background:#0c1522;color:white;border:1px solid #49627e;padding:12px}li{margin:10px 0;overflow-wrap:anywhere}.warn{color:#ffc66a}.legend{display:flex;gap:20px;flex-wrap:wrap;font-size:14px}footer{margin:25px 0;color:#b1c2d8;font-size:13px}@media print{body{background:white;color:black}section,.card{background:white;border-color:#aaa}.toolbar,textarea,#saveNote{display:none}p,small,footer{color:#333}main{padding:0}section{break-inside:avoid}}
+</style>
+<main><header><div><h1>Microgrid History</h1><p>Temperature, power and operational records alongside Blynk</p></div><span id="health">Connecting…</span></header>
+<div class="toolbar"><label>Period <select id="period"><option value="24h">Last 24 hours</option><option value="week">Last 7 days</option><option value="month">Last 30 days</option></select></label><div><a class="action" id="csv" href="/api/export.csv">Export CSV</a> <button id="print">Print / Save PDF report</button></div></div>
+<p id="range"></p><div class="cards" id="cards"></div>
+<section><h2>Power history (W)</h2><div class="legend"><span style="color:#56dfb7">Load power — bucket average</span><span style="color:#ffc66a">Solar power — bucket average</span></div><svg id="power" viewBox="0 0 1000 240" role="img" aria-label="Power over selected period"></svg></section>
+<section><h2>Temperature history (°C)</h2><svg id="temp" viewBox="0 0 1000 240" role="img" aria-label="Temperature over selected period"></svg></section>
+<section><h2>Recorded device events</h2><ul id="events"></ul></section>
+<section><h2>Recent device activity</h2><p>Latest 200 device events across all periods.</p><ul id="recentEvents"></ul></section>
+<section><h2>Report activity timeline</h2><p>Device events and maintenance notes, newest first, for the selected period.</p><ul id="activity"></ul></section>
+<section><h2>Important details & maintenance notes</h2><textarea id="note" maxlength="2000" placeholder="Record battery replacement, wiring changes, calibration or experiment observations"></textarea><button id="saveNote">Save note</button><span id="noteStatus"></span><ul id="notes"></ul></section>
+<footer>UTC storage; dates displayed in your browser's local timezone. Month = rolling 30 days. Energy is estimated from sampled power using trapezoidal integration; gaps longer than 3 minutes are excluded. Coverage shows how much of the selected period was measured. Relay states are reported software states, not independently verified contact states. Battery SoC is the firmware's voltage-based estimate. Missing load-current telemetry is not inferred. Temperature validity cannot be verified from this firmware's serial output.</footer>
+</main>
+<script>
+const el=id=>document.getElementById(id),fmt=(x,n=2)=>x==null?'Unavailable':Number(x).toFixed(n),date=t=>new Date(t*1000).toLocaleString();
+function node(tag,text){let n=document.createElement(tag);n.textContent=text;return n}
+function chart(id,points,keys,colors,start,end){
+ let svg=el(id);svg.replaceChildren();const ns='http://www.w3.org/2000/svg';
+ function shape(tag,attrs,text){let n=document.createElementNS(ns,tag);for(let k in attrs)n.setAttribute(k,attrs[k]);if(text)n.textContent=text;svg.appendChild(n);return n}
+ let vals=points.flatMap(p=>keys.map(k=>p[k])).filter(v=>v!=null);
+ if(!vals.length){shape('text',{x:400,y:120,fill:'#b1c2d8'},'No measurements in this period');return}
+ let low=Math.min(0,...vals),high=Math.max(...vals,1),span=high-low||1;
+ const x=t=>60+((t-start)/(end-start))*910,y=v=>200-(v-low)/span*170;
+ for(let i=0;i<5;i++){let v=low+span*i/4;shape('line',{x1:60,x2:970,y1:y(v),y2:y(v),stroke:'#30465f'});shape('text',{x:4,y:y(v)+5,fill:'#b1c2d8','font-size':13},v.toFixed(1))}
+ keys.forEach((key,j)=>{let d='',previous=null;points.forEach(p=>{if(p[key]==null){previous=null;return}let move=!previous||p.ts-previous.ts>(end-start)/720*1.6;d+=(move?'M':'L')+x(p.ts)+' '+y(p[key])+' ';previous=p});shape('path',{d,fill:'none',stroke:colors[j],'stroke-width':2});points.forEach(p=>{if(p[key]!=null){let c=shape('circle',{cx:x(p.ts),cy:y(p[key]),r:2,fill:colors[j]});let title=document.createElementNS(ns,'title');title.textContent=date(p.ts)+' | '+key+': '+fmt(p[key]);c.appendChild(title)}})});
+ shape('text',{x:60,y:230,fill:'#b1c2d8','font-size':13},date(start));shape('text',{x:970,y:230,fill:'#b1c2d8','font-size':13,'text-anchor':'end'},date(end));
+}
+async function refresh(){try{
+ let period=el('period').value;let [response,healthResponse,recentResponse]=await Promise.all([fetch('/api/history?period='+period),fetch('/api/health'),fetch('/api/recent-events')]);if(!response.ok||!healthResponse.ok||!recentResponse.ok)throw Error('Server request failed');let d=await response.json(),h=await healthResponse.json(),recent=await recentResponse.json();
+ el('health').textContent=(d.latest?.source==='demo'?'DEMO • synthetic data':h.stale?'No recent telemetry':'Receiving telemetry');el('health').className=h.stale?'warn':'';
+ el('range').textContent=date(d.start)+' — '+date(d.end)+' · '+d.samples+' samples';el('csv').href='/api/export.csv?period='+period;
+ let s=d.summary;let items=[['Latest temperature',fmt(d.latest?.temperature)+' °C'],['Latest load power',fmt(d.latest?.load_power)+' W'],['Load energy estimate',fmt(s.load_energy_wh_estimate)+' Wh'],['Solar energy estimate',fmt(s.solar_energy_wh_estimate)+' Wh'],['Load coverage',fmt(s.load_coverage_percent,1)+'%'],['Peak sampled load',fmt(s.peak_load_w)+' W'],['Maximum temperature',fmt(s.maximum_temperature_c)+' °C']];el('cards').replaceChildren();items.forEach(([label,value])=>{let c=node('div','');c.className='card';c.append(node('small',label),node('strong',value));el('cards').append(c)});
+ if(d.latest){let q=node('p','Latest sample: '+date(d.latest.ts)+' · quality: '+d.latest.quality);el('cards').append(q)}
+ chart('power',d.points,['load_power','solar_power'],['#56dfb7','#ffc66a'],d.start,d.end);chart('temp',d.points,['temperature'],['#70bdff'],d.start,d.end);
+ ['events','notes'].forEach(key=>{el(key).replaceChildren();d[key].forEach(row=>el(key).append(node('li',date(row.ts)+' — '+(row.message||row.text))));if(!d[key].length)el(key).append(node('li','No records in this period'))});
+ el('recentEvents').replaceChildren();recent.events.forEach(row=>el('recentEvents').append(node('li',date(row.ts)+' — '+row.message)));if(!recent.events.length)el('recentEvents').append(node('li','No recent device events'));
+ el('activity').replaceChildren();d.activity.forEach(row=>el('activity').append(node('li',date(row.ts)+' — '+row.category+': '+(row.message||row.text))));if(!d.activity.length)el('activity').append(node('li','No activity in this period'));
+ }catch(e){el('health').textContent='Backend unavailable: '+e.message}}
+el('period').onchange=refresh;el('print').onclick=()=>window.print();el('saveNote').onclick=async()=>{try{let r=await fetch('/api/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:el('note').value})});let d=await r.json();if(!r.ok)throw Error(d.error);el('note').value='';el('noteStatus').textContent=' Saved';refresh()}catch(e){el('noteStatus').textContent=' '+e.message}};refresh();setInterval(refresh,15000);
+</script></html>
