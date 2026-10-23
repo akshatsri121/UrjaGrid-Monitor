@@ -1,6 +1,34 @@
 # UrjaGrid-Monitor
 3rd Sem DSA + ST (Sensor Technology) Project
 
+## New Wi-Fi dashboard and independent load controls
+
+The new version uses **bulb INA219 `0x40` and fan INA219 `0x41`**, not a
+solar sensor. It includes a cloud-ready authenticated API, separate-load
+history, commands with ESP32 acknowledgements, and firmware-local fan lockout
+below **50% voltage-estimated SOC** (55% recovery, no automatic restart).
+
+Start with the isolated synthetic demo from the repository root:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe backend/control_app.py --demo
+```
+
+Open **http://127.0.0.1:8000**. The simulation never connects to a serial port
+or accepts real-device telemetry. Its data is stored separately from live data.
+Use the 45%, 52% and 60% simulation buttons to demonstrate fan hysteresis.
+
+**Follow [the complete software setup](docs/SOFTWARE_SETUP.md)** for real
+Wi-Fi telemetry, credential setup, firmware, Supabase and Vercel deployment.
+New sketch: `firmware/UrjaGrid_WiFi/UrjaGrid_WiFi.ino`. Load outputs are
+disabled by default until hardware configuration is confirmed. No firmware
+was uploaded automatically. No hosted account or deployment is provisioned.
+
+The sections below describe the **preserved legacy Blynk/serial prototype**;
+its sensor roles and safety behaviour do not apply to the new version.
+
 ## Project structure
 
 ```text

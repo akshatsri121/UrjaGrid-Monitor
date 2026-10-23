@@ -1,0 +1,13 @@
+.git/
+.venv/
+venv/
+.env
+.env.*
+firmware/
+STL Files/
+*.pdf
+*.docx
+backend/data/
+**/__pycache__/
+**/*.sqlite3*
+frontend/reference/
