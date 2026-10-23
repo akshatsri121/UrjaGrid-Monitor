@@ -36,7 +36,6 @@ float filteredVoltage = 0;
 char bootId[24];
 char modeRevision[65];
 
-struct BranchReading { bool valid = false; float voltage = 0, current = 0, power = 0, sourceVoltage = 0; };
 struct Snapshot {
   BranchReading branch[2];
   PolicySample sample;
@@ -72,6 +71,19 @@ bool addressPresent(uint8_t address) {
   return Wire.endTransmission() == 0;
 }
 
+bool readINARegister(uint8_t address, uint8_t reg, uint16_t& value) {
+  Wire.beginTransmission(address);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom(address, static_cast<size_t>(2), true) != 2) {
+    while (Wire.available()) Wire.read();
+    return false;
+  }
+  value = static_cast<uint16_t>(Wire.read()) << 8;
+  value |= static_cast<uint16_t>(Wire.read());
+  return true;
+}
+
 void writeOutputs() {
   for (unsigned i = 0; i < 2; ++i) {
     bool level = RELAY_ACTIVE_LOW ? !policy.isOn(i) : policy.isOn(i);
@@ -96,33 +108,38 @@ void sampleSensors(Snapshot& state) {
   PolicySample sample;
   for (unsigned i = 0; i < 2; ++i) {
     BranchReading reading;
-    if (!addressPresent(INA_ADDRESSES[i])) inaReady[i] = false;
+    reading.present = addressPresent(INA_ADDRESSES[i]);
+    if (!reading.present) inaReady[i] = false;
     else if (!inaReady[i]) {
       inaReady[i] = monitors[i]->begin(&Wire);
-      if (inaReady[i]) monitors[i]->setCalibration_32V_2A();
+      if (inaReady[i]) {
+        monitors[i]->setCalibration_32V_2A();
+        inaReady[i] = monitors[i]->success();
+      }
     }
+    reading.initialized = inaReady[i];
     if (inaReady[i]) {
-      reading.voltage = monitors[i]->getBusVoltage_V();
-      float shunt = monitors[i]->getShuntVoltage_mV() / 1000.0f;
-      reading.current = monitors[i]->getCurrent_mA() / 1000.0f;
-      reading.sourceVoltage = reading.voltage + shunt;
-      reading.power = reading.voltage * reading.current;
-      // A sensor may ACK while its measured supply is disconnected. Do not use
-      // near-zero/floating VIN readings as a real battery-percentage estimate.
-      reading.valid = std::isfinite(reading.voltage) && std::isfinite(reading.current) &&
-        std::isfinite(shunt) && reading.sourceVoltage >= 8 && reading.sourceVoltage <= 16.5f &&
-        reading.voltage >= 0 && reading.voltage <= 26 && std::fabs(reading.current) <= 2.0f &&
-        std::fabs(shunt) <= 0.32f && addressPresent(INA_ADDRESSES[i]);
+      uint16_t bus = 0, shunt = 0, current = 0, calibration = 0;
+      // Check each actual read, not just the address ACK. Do not turn a failed
+      // library read into a plausible zero-voltage/current measurement.
+      reading.readOK = readINARegister(INA_ADDRESSES[i], INA219_REG_BUSVOLTAGE, bus) &&
+        readINARegister(INA_ADDRESSES[i], INA219_REG_SHUNTVOLTAGE, shunt) &&
+        readINARegister(INA_ADDRESSES[i], INA219_REG_CURRENT, current) &&
+        readINARegister(INA_ADDRESSES[i], INA219_REG_CALIBRATION, calibration);
+      if (reading.readOK) decodeINARegisters(reading, bus, shunt, current, calibration);
     }
+    validateINAReading(reading);
+    if (reading.status == INAStatus::ReadFailed || reading.status == INAStatus::CalibrationLost)
+      inaReady[i] = false; // Reinitialize on the next sample; never energize a relay to recover.
     state.branch[i] = reading;
     sample.valid[i] = reading.valid;
     sample.current[i] = reading.current;
+    sample.branchSupply[i] = reading.sourceVoltage;
+    sample.sensorStatus[i] = reading.status;
   }
-  bool batteryValid = state.branch[0].valid || state.branch[1].valid;
-  if (state.branch[0].valid && state.branch[1].valid &&
-      std::fabs(state.branch[0].sourceVoltage - state.branch[1].sourceVoltage) > .25f) batteryValid = false;
+  float raw = 0;
+  bool batteryValid = selectBatteryVoltage(state.branch, raw);
   if (batteryValid) {
-    float raw = state.branch[state.branch[0].valid ? 0 : 1].sourceVoltage;
     filteredVoltage = filterReady ? .2f * raw + .8f * filteredVoltage : raw;
     filterReady = true;
     // Use raw voltage for immediate critical/overvoltage protection; filtering
@@ -290,6 +307,11 @@ void setup() {
   Wire.begin(21, 22);
   Wire.setClock(100000);
   Wire.setTimeOut(50);
+  Serial.print("INA219-range I2C address ACKs:");
+  for (uint8_t address = 0x40; address <= 0x4F; ++address) {
+    if (addressPresent(address)) Serial.printf(" 0x%02X", address);
+  }
+  Serial.println(" (expected bulb 0x40, fan 0x41)");
   temperatures.begin();
   temperatures.setResolution(12);
   temperatures.setWaitForConversion(false);
@@ -306,6 +328,7 @@ void setup() {
 void loop() {
   static Snapshot state;
   static uint32_t lastSample = 0;
+  static uint32_t lastDiagnostics = 0;
   static Ack processed[8] = {};
   static unsigned processedNext = 0;
   if (millis() - lastSample >= SAMPLE_MS) {
@@ -315,6 +338,16 @@ void loop() {
       state.sample.batteryValid ? state.sample.soc : -1,
       policy.isOn(0) ? "ON" : "OFF", policy.isOn(1) ? "ON" : "OFF", policy.reason(1),
       policy.isAutomaticProtection() ? "ON" : "OFF");
+  }
+  if (millis() - lastDiagnostics >= 5000) {
+    for (unsigned i = 0; i < 2; ++i) {
+      const BranchReading& r = state.branch[i];
+      Serial.printf("%s INA219 0x%02X | I2C=%s | status=%s | bus=%.3f V | shunt=%.3f mV | current=%.4f A | source=%.3f V | battery_source=%s\n",
+        i == 0 ? "Bulb" : "Fan", INA_ADDRESSES[i], r.present ? "ACK" : "NO_ACK",
+        r.valid ? (r.batteryCandidate ? "ok" : "read_ok_low_or_nonbattery_supply_check_VIN") : inaFaultReason(r.status),
+        r.voltage, r.shuntVoltage * 1000, r.current, r.sourceVoltage, r.batteryCandidate ? "yes" : "no");
+    }
+    lastDiagnostics = millis();
   }
   RemoteCommand command;
   if (xQueueReceive(commandQueue, &command, 0) == pdTRUE) {

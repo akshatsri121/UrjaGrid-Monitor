@@ -197,6 +197,16 @@ returns to battery negative. Sensor VCC is 3.3V, not battery voltage. Both SDA s
 GPIO21 and SCL share GPIO22. DS18B20 data is GPIO4 with a 4.7kΩ pull-up to 3.3V.
 GPIO26 controls bulb relay IN1; GPIO25 controls fan IN2, through an interface if needed.
 
+A zero-volt branch is not automatically a sensor fault: an open relay upstream
+of the sensor can legitimately remove its measured supply. The updated firmware
+checks actual register-read success and conversion/calibration/overflow flags,
+and separately selects a battery source only from real 8–16.5V readings. Thus a
+valid 0V bulb reading does not invalidate a healthy always-powered fan battery
+reading, but two zero-volt branches still provide no battery estimate. Keep the
+recommended upstream-sensor arrangement for reliable battery visibility. Serial
+Monitor at 115200 now shows exact sensor status and raw readings every five seconds.
+See [firmware troubleshooting](../firmware/UrjaGrid_WiFi/README.md#bulb-sensor-unavailable-diagnosis-and-zero-voltage-fix).
+
 ## 5. Supabase PostgreSQL and login
 
 These steps require your accounts; nothing has been provisioned automatically.
@@ -291,6 +301,8 @@ measurement. Negative power is shown as measured but excluded from consumption e
 .\.venv\Scripts\python.exe -m unittest discover -s backend -v
 g++ -std=c++11 -Wall -Wextra -pedantic firmware/tests/control_policy_test.cpp -o .venv/control_policy_test.exe
 .\.venv\control_policy_test.exe
+g++ -std=c++11 -Wall -Wextra -pedantic firmware/tests/sensor_validation_test.cpp -o .venv/sensor_validation_test.exe
+.\.venv\sensor_validation_test.exe
 node --check frontend/control.js
 ```
 

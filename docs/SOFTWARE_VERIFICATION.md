@@ -24,6 +24,12 @@
 - C++ tests also verify Manual bypasses only low-voltage/fan-SOC rules, Automatic
   immediately restores them, reboot defaults to Automatic, and mode changes never
   restart a load or bypass missing sensors, temperature/current/overvoltage checks.
+- The separate `sensor_validation_test.cpp` passes: successful 0V reads remain
+  measurements but cannot be battery sources; failed reads remain invalid;
+  signed register decoding, calibration reset, conversion-ready/overflow flags,
+  physical ranges and battery-source selection are covered. Policy tests verify
+  a 0V relay-OFF branch can be enabled with a genuine battery measurement from
+  the other sensor, while missing sensors and overvoltage still block ON.
 - `node --check frontend/control.js` passes; Python dependency check passes.
 - Root `requirements.txt` lists explicit dependency pins matching the tested lock,
   checked by a regression test. This removes the nested `-r` directive rejected
@@ -42,9 +48,11 @@
   in Automatic, Manual confirmation enables a fresh fan ON, restoring Automatic
   turns the running fan OFF again, and the warning/confirmed/pending states are
   displayed. The responsive narrow-panel layout was visually checked.
-- The current ESP32 sketch compiles with the user's local configuration (without
+- The mode-switch ESP32 version compiled with the user's local configuration (without
   printing credentials): **1,078,020 bytes flash (82%)**, **52,472 bytes static RAM
   (16%)**. This is compilation only, not upload or physical relay verification.
+- The subsequent sensor-validation/diagnostics version also compiles: **1,078,980
+  bytes flash (82%)**, **52,576 bytes static RAM (16%)**, without uploading.
 - Legacy sketches, serial server, existing archives and user hardware were not changed.
 
 The automated Supabase Auth test uses mocked provider responses. The browser demo
@@ -66,6 +74,12 @@ the agent.
 - The new automation-switch behavior is verified locally in tests and simulation;
   it still needs the new hosted deployment and a user-performed firmware upload
   before it can be verified on the physical device.
+- Subsequent read-only records show the new mode fields reaching the archive,
+  including Automatic OFF, but the bulb measurement remains invalid. Those old
+  payloads omit the raw failed readings, so they cannot distinguish missing I2C
+  hardware from the old below-8V validity rule. The sensor-validation correction
+  and serial diagnostics still require a user-performed firmware upload and a
+  physical check; a successful software test does not certify the bulb sensor.
 
 ## Still required before real operation
 
