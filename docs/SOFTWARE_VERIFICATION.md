@@ -2,8 +2,8 @@
 
 ## Verified locally
 
-- **29 Python tests pass**, using temporary databases. Includes all 11 preserved
-  legacy tests plus the new Wi-Fi API/archive tests.
+- **30 Python tests pass**, using temporary databases. Includes all 11 preserved
+  legacy tests plus the new Wi-Fi API/archive and dependency-manifest tests.
 - Tested authentication failures, HttpOnly/Secure hosted cookies, operator allowlist,
   cross-origin rejection, device-token separation, request-size limits, strict
   boolean/finite telemetry validation, and redaction of validation inputs.
@@ -17,6 +17,9 @@
   temperature hysteresis, latched current trips, missing/NaN sensor data, overvoltage
   and the default output-enable guard.
 - `node --check frontend/control.js` passes; Python dependency check passes.
+- Root `requirements.txt` lists explicit dependency pins matching the tested lock,
+  checked by a regression test. This removes the nested `-r` directive rejected
+  by the first Vercel deployment; the subsequent hosted build still needs verification.
 - ESP32 sketch compiles for `esp32:esp32:esp32`, ESP32 core **3.3.12**, with the
   output-disabled example configuration. No upload command was run.
 - A separate compile-only copy with dummy credentials also links the enabled

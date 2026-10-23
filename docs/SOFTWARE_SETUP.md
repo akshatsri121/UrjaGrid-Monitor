@@ -33,9 +33,12 @@ python -m venv .venv
 Open **http://127.0.0.1:8000**. Stop with Ctrl+C. If the port is occupied, add
 `--port 8010` and open that port instead. Do not run the legacy server on the same port.
 
-Root `requirements.txt` uses the tested dependency lock; `.python-version` selects
-Python 3.12 for hosting. The separate `backend/requirements-control.txt` lists the
-direct dependency ranges for future, deliberate updates.
+Root `requirements.txt` explicitly lists the same pins as the tested
+`backend/requirements-control.lock.txt`; Vercel's deployment parser rejected a
+nested `-r` include. Keep both pin lists synchronized (checked by the tests).
+`.python-version` selects Python 3.12 for hosting. The separate
+`backend/requirements-control.txt` lists the direct dependency ranges for future,
+deliberate updates.
 
 The gold SIMULATION banner stays visible. Thirty days of generated five-minute
 readings are seeded once into `backend/data/control-demo.sqlite3`; live simulated
