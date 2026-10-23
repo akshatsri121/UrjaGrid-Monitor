@@ -34,6 +34,7 @@ bool inaReady[] = {false, false};
 bool filterReady = false;
 float filteredVoltage = 0;
 char bootId[24];
+char modeRevision[65];
 
 struct BranchReading { bool valid = false; float voltage = 0, current = 0, power = 0, sourceVoltage = 0; };
 struct Snapshot {
@@ -42,8 +43,10 @@ struct Snapshot {
   bool on[2] = {false, false};
   char reason[2][100] = {{0}, {0}};
   uint32_t uptime = 0;
+  bool automaticProtection = true;
+  char modeRevision[65] = {};
 };
-struct RemoteCommand { char id[37]; unsigned load; bool on; uint32_t receivedAt, ttl; };
+struct RemoteCommand { char id[37]; char modeRevision[65]; unsigned load; bool on; uint32_t receivedAt, ttl; };
 struct Ack { char id[37]; char status[12]; char reason[100]; };
 Snapshot published;
 SemaphoreHandle_t snapshotMutex;
@@ -78,6 +81,8 @@ void writeOutputs() {
 
 void publishState(Snapshot& state) {
   state.uptime = millis();
+  state.automaticProtection = policy.isAutomaticProtection();
+  strlcpy(state.modeRevision, modeRevision, sizeof(state.modeRevision));
   for (unsigned i = 0; i < 2; ++i) {
     state.on[i] = policy.isOn(i);
     strlcpy(state.reason[i], policy.reason(i), sizeof(state.reason[i]));
@@ -193,6 +198,8 @@ void networkTask(void*) {
     doc["boot_id"] = bootId;
     doc["sequence"] = ++sequence;
     doc["uptime_ms"] = static_cast<uint64_t>(state.uptime);
+    doc["automatic_protection"] = state.automaticProtection;
+    doc["mode_revision"] = state.modeRevision;
     time_t epoch = time(nullptr);
     if (epoch >= 1700000000) doc["measured_at"] = static_cast<double>(epoch);
     else doc["measured_at"] = nullptr;
@@ -242,13 +249,16 @@ void networkTask(void*) {
           for (JsonObject item : reply["commands"].as<JsonArray>()) {
             const char* id = item["id"] | "";
             const char* load = item["load"] | "";
+            const char* revision = item["mode_revision"] | "";
             long ttl = item["ttl_ms"] | 0;
             uint32_t elapsed = millis() - started;
             if (strlen(id) != 36 || !item["on"].is<bool>() || ttl <= 0 || ttl > 15000 ||
-                elapsed >= static_cast<uint32_t>(ttl) || (strcmp(load, "bulb") && strcmp(load, "fan"))) continue;
+                elapsed >= static_cast<uint32_t>(ttl) || strlen(revision) > 64 ||
+                (strcmp(load, "bulb") && strcmp(load, "fan") && strcmp(load, "automation"))) continue;
             RemoteCommand command;
             strlcpy(command.id, id, sizeof(command.id));
-            command.load = strcmp(load, "bulb") == 0 ? 0 : 1;
+            strlcpy(command.modeRevision, revision, sizeof(command.modeRevision));
+            command.load = strcmp(load, "bulb") == 0 ? 0 : strcmp(load, "fan") == 0 ? 1 : 2;
             command.on = item["on"].as<bool>();
             command.receivedAt = millis();
             command.ttl = static_cast<uint32_t>(ttl) - elapsed;
@@ -276,6 +286,7 @@ void setup() {
     while (true) delay(1000);
   }
   snprintf(bootId, sizeof(bootId), "%08lx%08lx", (unsigned long)esp_random(), (unsigned long)esp_random());
+  strlcpy(modeRevision, bootId, sizeof(modeRevision));
   Wire.begin(21, 22);
   Wire.setClock(100000);
   Wire.setTimeOut(50);
@@ -285,6 +296,9 @@ void setup() {
   temperatures.requestTemperatures();
   Serial.println("UrjaGrid Wi-Fi: bulb=0x40 fan=0x41. Both outputs start OFF.");
   Serial.println(ENABLE_LOAD_OUTPUTS ? "Outputs enabled; software interlocks active." : "OUTPUTS DISABLED: verify hardware before enabling in secrets.h.");
+  Serial.println("Automatic protection ON. Website mode changes require device acknowledgement; restart restores Automatic.");
+  Snapshot initial;
+  publishState(initial);
   if (xTaskCreate(networkTask, "network", 12288, nullptr, 1, nullptr) != pdPASS)
     Serial.println("Network task failed; local protection continues, outputs start OFF.");
 }
@@ -297,9 +311,10 @@ void loop() {
   if (millis() - lastSample >= SAMPLE_MS) {
     sampleSensors(state);
     lastSample = millis();
-    Serial.printf("Battery estimate: %.1f%% | Bulb: %s | Fan: %s | fan reason: %s\n",
+    Serial.printf("Battery estimate: %.1f%% | Bulb: %s | Fan: %s | fan reason: %s | Automatic: %s\n",
       state.sample.batteryValid ? state.sample.soc : -1,
-      policy.isOn(0) ? "ON" : "OFF", policy.isOn(1) ? "ON" : "OFF", policy.reason(1));
+      policy.isOn(0) ? "ON" : "OFF", policy.isOn(1) ? "ON" : "OFF", policy.reason(1),
+      policy.isAutomaticProtection() ? "ON" : "OFF");
   }
   RemoteCommand command;
   if (xQueueReceive(commandQueue, &command, 0) == pdTRUE) {
@@ -311,9 +326,19 @@ void loop() {
     if (!seen) {
       strlcpy(ack.id, command.id, sizeof(ack.id));
       bool expired = millis() - command.receivedAt >= command.ttl;
-      bool applied = !expired && policy.command(command.load, command.on);
+      bool loadOff = command.load < 2 && !command.on;
+      bool staleMode = !loadOff && strcmp(command.modeRevision, modeRevision) != 0;
+      bool applied = false;
+      if (!expired && !staleMode) {
+        if (command.load == 2) {
+          policy.setAutomaticProtection(command.on);
+          strlcpy(modeRevision, command.id, sizeof(modeRevision));
+          applied = true;
+        } else applied = policy.command(command.load, command.on);
+      }
       strlcpy(ack.status, applied ? "applied" : "rejected", sizeof(ack.status));
-      strlcpy(ack.reason, expired ? "command_expired" : applied ? "" : policy.reason(command.load), sizeof(ack.reason));
+      strlcpy(ack.reason, expired ? "command_expired" : staleMode ? "mode_changed_send_new_request" :
+              applied ? "" : policy.reason(command.load), sizeof(ack.reason));
       processed[processedNext++ % 8] = ack;
       writeOutputs();
       publishState(state);

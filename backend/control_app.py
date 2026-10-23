@@ -43,6 +43,9 @@ def create_app(settings=None, archive=None):
     app.state.demo_states = {'bulb': True, 'fan': True}
     app.state.demo_soc = None
     app.state.demo_fan_locked = False
+    app.state.demo_automatic = True
+    app.state.demo_revision = 'demo-history'
+    app.state.demo_critical_locked = False
 
     def store():
         with state_lock:
@@ -154,14 +157,25 @@ def create_app(settings=None, archive=None):
                         conn.execute(archive.samples.insert(), records)
                 # Unique boot per process: retained pending demo commands must not replay.
                 app.state.demo_boot = 'demo-' + secrets.token_hex(8)
+                app.state.demo_revision = app.state.demo_boot
             app.state.demo_seq += 1
             sample = synthetic(now, app.state.demo_seq, app.state.demo_states)
             sample['boot_id'] = app.state.demo_boot
             response = archive.sync(sample, now)
             acks = []
             for command in response['commands']:
-                app.state.demo_states[command['load']] = command['on']
-                acks.append(dict(id=command['id'], status='applied', reason='Simulated, no hardware'))
+                is_off = command['load'] != 'automation' and not command['on']
+                if not is_off and command.get('mode_revision') != app.state.demo_revision:
+                    acks.append(dict(id=command['id'], status='rejected', reason='mode_changed_send_new_request'))
+                elif command['load'] == 'automation':
+                    app.state.demo_automatic = command['on']
+                    app.state.demo_revision = command['id']
+                    acks.append(dict(id=command['id'], status='applied', reason='Simulated, no hardware'))
+                elif command['on'] and sample[command['load']]['blocked_reason']:
+                    acks.append(dict(id=command['id'], status='rejected', reason=sample[command['load']]['blocked_reason']))
+                else:
+                    app.state.demo_states[command['load']] = command['on']
+                    acks.append(dict(id=command['id'], status='applied', reason='Simulated, no hardware'))
             if acks:
                 app.state.demo_seq += 1
                 sample = synthetic(now, app.state.demo_seq, app.state.demo_states)
@@ -175,20 +189,30 @@ def create_app(settings=None, archive=None):
         soc = app.state.demo_soc if app.state.demo_soc is not None else 72 + 8 * math.sin(phase)
         if app.state.demo_soc is not None:
             voltage = 11.8 + soc / 100
-            if soc < 50:
-                app.state.demo_fan_locked = True
+        if soc < 50:
+            app.state.demo_fan_locked = True
+        elif soc >= 55:
+            app.state.demo_fan_locked = False
+        if voltage <= 11.8:
+            app.state.demo_critical_locked = True
+        elif voltage >= 12.1:
+            app.state.demo_critical_locked = False
+        if app.state.demo_automatic:
+            if app.state.demo_critical_locked:
+                states['bulb'] = states['fan'] = False
+            elif app.state.demo_fan_locked:
                 states['fan'] = False
-            elif soc >= 55:
-                app.state.demo_fan_locked = False
         sample = dict(protocol=1, device_id=device_id, boot_id='demo-history', sequence=sequence,
             uptime_ms=sequence * 5000, measured_at=ts, battery_voltage=voltage,
             soc_estimate=soc, soc_source='generic_vrla_voltage_v1',
-            temperature_c=27 + 2 * math.sin(phase), acks=[])
+            temperature_c=27 + 2 * math.sin(phase), acks=[],
+            automatic_protection=app.state.demo_automatic, mode_revision=app.state.demo_revision)
         for load, nominal in (('bulb', 8.5), ('fan', 1.1)):
             power = nominal * (1 + .06 * math.sin(phase * 3)) if states[load] else 0
             sample[load] = dict(valid=True, voltage_v=voltage, current_a=power / voltage,
                                 power_w=power, on=states[load], blocked_reason=(
-                                    'soc_below_50_or_recovery_below_55' if load == 'fan' and app.state.demo_fan_locked else ''))
+                                    'critical_battery_voltage' if app.state.demo_automatic and app.state.demo_critical_locked else
+                                    'soc_below_50_or_recovery_below_55' if app.state.demo_automatic and load == 'fan' and app.state.demo_fan_locked else ''))
         return sample
 
     @app.middleware('http')
@@ -365,6 +389,8 @@ if __name__ == '__main__':
     settings = dict(os.environ)
     if args.demo:
         settings['URJAGRID_DEMO'] = '1'
+        # Do not inherit the live laptop/cloud origin when previewing simulation.
+        settings['APP_ORIGIN'] = f'http://127.0.0.1:{args.port}'
         if args.host != '127.0.0.1':
             parser.error('Unauthenticated demo is loopback-only')
     import uvicorn

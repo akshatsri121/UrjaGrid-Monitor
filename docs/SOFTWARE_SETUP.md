@@ -10,6 +10,10 @@
 - Firmware-local fan lockout below 50% estimated SOC, recovery at 55%, fresh
   user ON required. Both loads boot OFF. Missing battery/temperature data,
   critical voltage and configured overload/overvoltage checks block ON.
+- An acknowledged **Automatic protection ON/OFF** switch. Automatic ON applies
+  battery policies; OFF allows manual operation despite low battery percentage
+  or voltage, while retaining sensor-fault and electrical checks. Reboot restores
+  Automatic ON. Manual battery override can damage a depleted battery.
 - Blynk and USB serial collection are not required. USB supplies power only
   after uploading. Use router/hotspot Wi-Fi with internet access for cloud mode.
 
@@ -132,16 +136,41 @@ Review the provisional settings before enabling:
 | `MAX_LOAD_SUPPLY_V` | 12.8V | Blocks both loads above this provisional voltage; do not raise beyond verified load tolerance |
 | `BULB_CURRENT_LIMIT_A` | 1.5A | Provisional software trip, not a wiring/fuse rating |
 | `FAN_CURRENT_LIMIT_A` | 0.3A | Provisional; actual fan rating/startup remains unverified |
-| Critical cutoff / recovery | 11.8V / 12.1V | Prototype values in `ControlPolicy.h`, not calibrated battery specifications |
+| Automatic-mode critical cutoff / recovery | 11.8V / 12.1V | Prototype values in `ControlPolicy.h`; bypassed only while the device confirms Automatic OFF |
 | Temperature trip / recovery | 50°C / 45°C | Prototype interlock; not battery-charge temperature compensation |
 
-The fan locks below 50% estimated SOC and stays locked until at least 55%.
+In Automatic mode, the fan locks below 50% estimated SOC and stays locked until at least 55%.
 Recovery never restarts a load automatically. A current trip stays latched until
 an explicit OFF request resets it after measured current has fallen below its limit.
-No manual mode bypasses interlocks. A failed sensor blocks its own load; missing
+Manual mode bypasses only low battery voltage/SOC policies. A failed sensor blocks its own load; missing
 battery or temperature measurements block both. Battery readings differing by
 more than 0.25V are treated as invalid. The INA219's calibrated "32V" library mode
 does not change the chip's 26V common-mode limit.
+
+### Using the Automatic protection switch
+
+1. Deploy the updated backend/frontend before uploading the updated ESP32 sketch.
+2. Existing device telemetry still works, but the switch displays an update message
+   until the ESP32 reports `automatic_protection` and `mode_revision`.
+3. With the updated device online, click the switch. It stays at its previous
+   confirmed value while the request is queued/delivered. New load ON requests
+   pause until the ESP32 acknowledges; load OFF requests remain available.
+4. **OFF / Manual:** low-voltage and below-50% fan rules no longer block ON.
+   Valid battery/temperature/load measurements are still required, and all
+   sensor-fault, polarity, output-enable, temperature, current and overvoltage
+   checks remain active. Manual mode does not fix an invalid INA219 or change
+   the displayed battery percentage. Continued discharge can damage the battery.
+5. **ON / Automatic:** the firmware immediately restores both-load critical-voltage
+   protection and the fan's 50% / 55% hysteresis. Ineligible running loads turn OFF;
+   no load starts automatically. Send a fresh ON after any recovery.
+6. Power cycling always restores Automatic ON and both loads OFF. Wi-Fi loss
+   retains the last confirmed mode; it does not act as an emergency stop.
+
+Mode changes are audited and bound to the current device boot and mode revision,
+with the same 15-second expiry as load commands. Older pending ON requests are
+cancelled on mode change, and firmware rejects ON requests from an older revision.
+The earlier `ENABLE_CRITICAL_BATTERY_CUTOFF` header override is retired; the
+website's acknowledged switch now controls battery-policy behavior.
 
 Upload with battery and panel disconnected. The sketch does not auto-enable
 loads or perform an automatic relay cycle. USB serial is diagnostic only, at 115200.
@@ -233,6 +262,10 @@ Firmware POSTs `/api/device/sync` with its own Bearer device token every roughly
 five seconds plus request duration. Receipt time is used for history; optional
 device measurement time is stored separately. Protocol: `backend/control_models.py`.
 Missing readings are null with validity flags, not fabricated zero values.
+New telemetry additionally reports the confirmed `automatic_protection` Boolean
+and `mode_revision`. Legacy devices omit both fields. An additive
+`ug_command_context` table binds commands to mode revisions without modifying or
+deleting existing archive columns or historical samples.
 
 Website controls POST explicit ON/OFF commands. Each has a unique UUID and a 15-second
 expiry. ESP32 receives pending commands in sync responses, rechecks local interlocks,

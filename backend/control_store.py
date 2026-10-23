@@ -72,6 +72,11 @@ class SQLArchive(ArchiveBase):
             Column('updated_at', Float, nullable=False), Column('actor', String(254), nullable=False),
             Column('reason', String(200), nullable=False, default=''))
         Index('ug_commands_device_time', self.commands.c.device_id, self.commands.c.created_at)
+        # Additive table: existing SQLite/Postgres archives need no column rewrite.
+        # Bind new commands to the device-confirmed mode at request time.
+        self.command_context = Table('ug_command_context', self.meta,
+            Column('command_id', String(36), primary_key=True),
+            Column('mode_revision', String(64), nullable=False))
         self.activity = Table('ug_activity', self.meta,
             Column('id', Integer, primary_key=True), Column('device_id', String(64), nullable=False),
             Column('ts', Float, nullable=False), Column('kind', String(32), nullable=False),
@@ -129,8 +134,18 @@ class SQLArchive(ArchiveBase):
                 continue
             # Acknowledged application must agree with this device-reported state.
             status, reason = ack['status'], ack['reason']
-            if status == 'applied' and sample[command['load']]['on'] != command['on']:
-                status, reason = 'rejected', 'Reported state differs from request'
+            if status == 'applied':
+                if command['load'] == 'automation':
+                    matches = (sample.get('automatic_protection') is command['on']
+                               and sample.get('mode_revision') == command['id'])
+                else:
+                    matches = sample[command['load']]['on'] == command['on']
+                    context = conn.execute(select(self.command_context.c.mode_revision).where(
+                        self.command_context.c.command_id == command['id'])).scalar_one_or_none()
+                    if command['on'] and context is not None:
+                        matches = matches and context == sample.get('mode_revision')
+                if not matches:
+                    status, reason = 'rejected', 'Reported state or mode differs from request'
             conn.execute(update(self.commands).where(self.commands.c.id == command['id'])
                          .values(status=status, reason=reason, updated_at=now))
             self._event(conn, now, 'command', f"{command['load']} {'ON' if command['on'] else 'OFF'}: {status} {reason}")
@@ -161,6 +176,14 @@ class SQLArchive(ArchiveBase):
                     return {'accepted': True, 'duplicate': True, 'commands': []}
                 raise Conflict('Out-of-order telemetry')
             self._apply_acks(conn, sample, now)
+            if sample.get('mode_revision') is not None:
+                stale_contexts = select(self.command_context.c.command_id).where(
+                    self.command_context.c.mode_revision != sample['mode_revision'])
+                conn.execute(update(self.commands).where(self.commands.c.device_id == self.device_id,
+                    self.commands.c.status.in_(['queued', 'delivered']),
+                    self.commands.c.id.in_(stale_contexts),
+                    (self.commands.c.on.is_(True) | (self.commands.c.load == 'automation')))
+                    .values(status='cancelled', reason='Control mode changed; fresh request required', updated_at=now))
             values = {key: sample.get(key) for key in ('battery_voltage', 'soc_estimate', 'temperature_c')}
             for load in ('bulb', 'fan'):
                 for suffix in ('voltage_v', 'current_a', 'power_w'):
@@ -169,6 +192,10 @@ class SQLArchive(ArchiveBase):
             valid_interval = device['boot_id'] == sample['boot_id'] and 0 < dt <= MAX_ENERGY_GAP
             interval = dt if valid_interval else 0
             previous = device['latest'] or {}
+            if sample.get('automatic_protection') is not None and (
+                    previous.get('automatic_protection') != sample['automatic_protection']):
+                state = 'ON (automatic)' if sample['automatic_protection'] else 'OFF (manual battery override)'
+                self._event(conn, now, 'automation', 'Device confirmed automatic protection ' + state)
             for load in ('bulb', 'fan'):
                 before = previous.get(load, {})
                 good = valid_interval and before.get('valid') and sample[load]['valid']
@@ -190,8 +217,16 @@ class SQLArchive(ArchiveBase):
             for command in queued:
                 conn.execute(update(self.commands).where(self.commands.c.id == command['id'])
                              .values(status='delivered', updated_at=now))
-            return {'accepted': True, 'duplicate': False, 'commands': [dict(id=c['id'], load=c['load'],
-                on=c['on'], ttl_ms=int((c['expires_at'] - now) * 1000)) for c in queued]}
+            wire_commands = []
+            for command in queued:
+                item = dict(id=command['id'], load=command['load'], on=command['on'],
+                            ttl_ms=int((command['expires_at'] - now) * 1000))
+                revision = conn.execute(select(self.command_context.c.mode_revision).where(
+                    self.command_context.c.command_id == command['id'])).scalar_one_or_none()
+                if revision is not None:
+                    item['mode_revision'] = revision
+                wire_commands.append(item)
+            return {'accepted': True, 'duplicate': False, 'commands': wire_commands}
 
     def request_command(self, request, actor, now=None):
         now = time.time() if now is None else now
@@ -206,15 +241,33 @@ class SQLArchive(ArchiveBase):
                 return dict(existing)
             if device['last_seen'] is None or now - device['last_seen'] > ONLINE_SECONDS:
                 raise Conflict('Device offline; no command queued')
-            branch = device['latest'][request['load']]
-            if request['on'] and (not branch['valid'] or device['latest']['battery_voltage'] is None
-                                  or device['latest']['temperature_c'] is None):
-                raise Conflict('ON blocked: required sensor data unavailable')
-            if request['on'] and branch['blocked_reason']:
-                raise Conflict('ON blocked: ' + branch['blocked_reason'])
-            if request['on'] and request['load'] == 'fan' and (
-                device['latest']['soc_estimate'] is None or device['latest']['soc_estimate'] < 50):
-                raise Conflict('ON blocked: battery estimate unavailable or below 50%')
+            latest = device['latest']
+            automatic = latest.get('automatic_protection') is not False
+            pending_mode = conn.execute(select(self.commands.c.id).where(
+                self.commands.c.device_id == self.device_id, self.commands.c.load == 'automation',
+                self.commands.c.status.in_(['queued', 'delivered']))).first()
+            if request['load'] == 'automation':
+                if latest.get('automatic_protection') is None or not latest.get('mode_revision'):
+                    raise Conflict('Update ESP32 firmware to support the automation switch')
+                # A mode change cannot revive an earlier ON. OFF requests are retained.
+                conn.execute(update(self.commands).where(self.commands.c.device_id == self.device_id,
+                    self.commands.c.load.in_(['bulb', 'fan']), self.commands.c.on.is_(True),
+                    self.commands.c.status.in_(['queued', 'delivered']))
+                    .values(status='cancelled', reason='Mode change requested; fresh ON required', updated_at=now))
+            else:
+                branch = latest[request['load']]
+                if request['on'] and pending_mode:
+                    raise Conflict('Wait for the ESP32 to confirm the requested control mode')
+                if request['on'] and (not branch['valid'] or latest['battery_voltage'] is None
+                                      or latest['temperature_c'] is None):
+                    raise Conflict('ON blocked: required sensor data unavailable')
+                if request['on'] and branch['blocked_reason']:
+                    raise Conflict('ON blocked: ' + branch['blocked_reason'])
+                if request['on'] and automatic and latest.get('automatic_protection') is True and latest['battery_voltage'] <= 11.8:
+                    raise Conflict('ON blocked: critical battery voltage')
+                if request['on'] and automatic and request['load'] == 'fan' and (
+                    latest['soc_estimate'] is None or latest['soc_estimate'] < 50):
+                    raise Conflict('ON blocked: battery estimate unavailable or below 50%')
             conn.execute(update(self.commands).where(self.commands.c.device_id == self.device_id,
                 self.commands.c.load == request['load'], self.commands.c.status.in_(['queued', 'delivered']))
                 .values(status='cancelled', reason='Superseded by a newer request', updated_at=now))
@@ -222,6 +275,9 @@ class SQLArchive(ArchiveBase):
                 load=request['load'], on=request['on'], status='queued', created_at=now,
                 expires_at=now + COMMAND_SECONDS, updated_at=now, actor=actor, reason='')
             conn.execute(insert(self.commands).values(**command))
+            if latest.get('mode_revision'):
+                conn.execute(insert(self.command_context).values(command_id=request_id,
+                                                                  mode_revision=latest['mode_revision']))
             self._event(conn, now, 'request', f"{actor} requested {request['load']} {'ON' if request['on'] else 'OFF'}")
             return command
 
@@ -310,7 +366,8 @@ class SQLArchive(ArchiveBase):
             result = conn.execution_options(stream_results=True).execute(select(self.samples).where(
                 self.samples.c.device_id == self.device_id, self.samples.c.ts >= end - PERIODS[period],
                 self.samples.c.ts <= end).order_by(self.samples.c.ts))
-            keys = ('timestamp_utc', *METRICS, 'bulb_on', 'fan_on', 'bulb_valid', 'fan_valid', 'soc_source', 'source')
+            keys = ('timestamp_utc', *METRICS, 'bulb_on', 'fan_on', 'bulb_valid', 'fan_valid',
+                    'soc_source', 'source', 'automatic_protection', 'mode_revision')
             out = io.StringIO()
             writer = csv.writer(out)
             writer.writerow(keys)
@@ -321,7 +378,8 @@ class SQLArchive(ArchiveBase):
                 p = row['payload']
                 writer.writerow([datetime.fromtimestamp(row['ts'], timezone.utc).isoformat(),
                     *[row[k] for k in METRICS], p['bulb']['on'], p['fan']['on'],
-                    p['bulb']['valid'], p['fan']['valid'], p['soc_source'], p['source']])
+                    p['bulb']['valid'], p['fan']['valid'], p['soc_source'], p['source'],
+                    p.get('automatic_protection'), p.get('mode_revision')])
                 yield out.getvalue()
 
 

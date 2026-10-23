@@ -8,6 +8,12 @@ solar sensor. It includes a cloud-ready authenticated API, separate-load
 history, commands with ESP32 acknowledgements, and firmware-local fan lockout
 below **50% voltage-estimated SOC** (55% recovery, no automatic restart).
 
+The website's **Automatic protection** switch can turn battery-policy automation
+ON/OFF, with ESP32 acknowledgement. OFF permits manual control despite low battery
+voltage/SOC, but does not bypass sensor-fault, temperature, current or overvoltage
+checks. ON immediately restores the battery rules; reboot defaults to ON. Both
+the hosted software and the ESP32 firmware must be updated to use the switch.
+
 Start with the isolated synthetic demo from the repository root:
 
 ```powershell
@@ -24,7 +30,8 @@ Use the 45%, 52% and 60% simulation buttons to demonstrate fan hysteresis.
 Wi-Fi telemetry, credential setup, firmware, Supabase and Vercel deployment.
 New sketch: `firmware/UrjaGrid_WiFi/UrjaGrid_WiFi.ino`. Load outputs are
 disabled by default until hardware configuration is confirmed. No firmware
-was uploaded automatically. No hosted account or deployment is provisioned.
+was uploaded automatically. Hosting requires your own configured accounts;
+credentials stay outside Git.
 
 The sections below describe the **preserved legacy Blynk/serial prototype**;
 its sensor roles and safety behaviour do not apply to the new version.

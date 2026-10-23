@@ -43,12 +43,16 @@ class Telemetry(StrictModel):
     soc_estimate: float | None = Field(default=None, ge=0, le=100)
     soc_source: Literal['generic_vrla_voltage_v1'] = 'generic_vrla_voltage_v1'
     temperature_c: float | None = Field(default=None, ge=-55, le=125)
+    automatic_protection: bool | None = Field(default=None, strict=True)
+    mode_revision: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]{1,64}$')
     bulb: Branch
     fan: Branch
     acks: list[Acknowledgement] = Field(default_factory=list, max_length=8)
 
     @model_validator(mode='after')
     def check_battery(self):
+        if (self.automatic_protection is None) != (self.mode_revision is None):
+            raise ValueError('automation state and mode revision must be reported together')
         if (self.battery_voltage is None) != (self.soc_estimate is None):
             raise ValueError('battery voltage and SOC estimate must be available together')
         if self.battery_voltage is not None and not (self.bulb.valid or self.fan.valid):
@@ -58,7 +62,7 @@ class Telemetry(StrictModel):
 
 class CommandRequest(StrictModel):
     request_id: UUID
-    load: Literal['bulb', 'fan']
+    load: Literal['bulb', 'fan', 'automation']
     on: bool = Field(strict=True)
 
 

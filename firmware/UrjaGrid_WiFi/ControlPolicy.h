@@ -27,6 +27,14 @@ class ControlPolicy {
  public:
   explicit ControlPolicy(PolicyConfig settings) : config(settings) {}
 
+  bool isAutomaticProtection() const { return automaticProtection; }
+
+  // Re-evaluate immediately when enabling automation; never restart a load.
+  void setAutomaticProtection(bool enabled) {
+    automaticProtection = enabled;
+    update(latest);
+  }
+
   void update(const PolicySample& sample) {
     latest = sample;
     if (!sample.batteryValid || !std::isfinite(sample.voltage) || !std::isfinite(sample.soc)) {
@@ -51,14 +59,14 @@ class ControlPolicy {
     if (load > 1) return "invalid_load";
     if (!config.outputsEnabled) return "hardware_configuration_not_confirmed";
     if (!latest.batteryValid || !std::isfinite(latest.voltage) || !std::isfinite(latest.soc)) return "battery_measurement_unavailable";
-    if (criticalLocked) return "critical_battery_voltage";
+    if (automaticProtection && criticalLocked) return "critical_battery_voltage";
     if (latest.voltage > config.maximumLoadVoltage) return "load_supply_overvoltage";
     if (!latest.temperatureValid || !std::isfinite(latest.temperature)) return "temperature_sensor_unavailable";
     if (temperatureLocked) return "temperature_lockout";
     if (!latest.valid[load] || !std::isfinite(latest.current[load])) return "load_sensor_unavailable";
     if (latest.current[load] < -0.05f) return "check_sensor_polarity";
     if (currentTripped[load]) return "current_trip_send_OFF_to_reset";
-    if (load == 1 && fanLocked) return "soc_below_50_or_recovery_below_55";
+    if (automaticProtection && load == 1 && fanLocked) return "soc_below_50_or_recovery_below_55";
     return "";
   }
 
@@ -80,6 +88,7 @@ class ControlPolicy {
  private:
   PolicyConfig config;
   PolicySample latest;
+  bool automaticProtection = true;
   bool state[2] = {false, false};
   bool currentTripped[2] = {false, false};
   bool fanLocked = true;

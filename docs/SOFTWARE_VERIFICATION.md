@@ -2,7 +2,7 @@
 
 ## Verified locally
 
-- **30 Python tests pass**, using temporary databases. Includes all 11 preserved
+- **42 Python tests pass**, using temporary databases. Includes all 11 preserved
   legacy tests plus the new Wi-Fi API/archive and dependency-manifest tests.
 - Tested authentication failures, HttpOnly/Secure hosted cookies, operator allowlist,
   cross-origin rejection, device-token separation, request-size limits, strict
@@ -16,10 +16,18 @@
   independent loads, below-50% fan cutoff, 55% recovery without automatic restart,
   temperature hysteresis, latched current trips, missing/NaN sensor data, overvoltage
   and the default output-enable guard.
+- Tested Automatic/Manual mode acknowledgement, persistence, authentication and
+  strict Boolean validation; pending-mode ON blocking; cancellation of stale ON
+  requests; revision/state acknowledgement matching; command expiry and reboot
+  behavior; retained OFF commands; legacy-device compatibility; additive table
+  creation without archive deletion; CSV mode history; and the simulated round trip.
+- C++ tests also verify Manual bypasses only low-voltage/fan-SOC rules, Automatic
+  immediately restores them, reboot defaults to Automatic, and mode changes never
+  restart a load or bypass missing sensors, temperature/current/overvoltage checks.
 - `node --check frontend/control.js` passes; Python dependency check passes.
 - Root `requirements.txt` lists explicit dependency pins matching the tested lock,
   checked by a regression test. This removes the nested `-r` directive rejected
-  by the first Vercel deployment; the subsequent hosted build still needs verification.
+  by the first Vercel deployment; the user subsequently confirmed that fix deployed.
 - ESP32 sketch compiles for `esp32:esp32:esp32`, ESP32 core **3.3.12**, with the
   output-disabled example configuration. No upload command was run.
 - A separate compile-only copy with dummy credentials also links the enabled
@@ -30,6 +38,13 @@
 - Browser-verified demo: independent load display, 45% fan lockout, continued lockout
   at 52%, unlock without restart at 60%, fresh ON request and simulated acknowledgement,
   30-day charts and saved maintenance notes. The simulation banner remains visible.
+- Browser-verified new switch in the isolated simulation: at 45% the fan is locked
+  in Automatic, Manual confirmation enables a fresh fan ON, restoring Automatic
+  turns the running fan OFF again, and the warning/confirmed/pending states are
+  displayed. The responsive narrow-panel layout was visually checked.
+- The current ESP32 sketch compiles with the user's local configuration (without
+  printing credentials): **1,078,020 bytes flash (82%)**, **52,472 bytes static RAM
+  (16%)**. This is compilation only, not upload or physical relay verification.
 - Legacy sketches, serial server, existing archives and user hardware were not changed.
 
 The automated Supabase Auth test uses mocked provider responses. The browser demo
@@ -45,8 +60,12 @@ the agent.
 - The user's Supabase SQL result shows stored telemetry rows, including 24.75°C
   temperature. Battery voltage and per-load power are null in that result, so
   those fields have not been verified as valid live measurements by this check.
-- The laptop still runs the API. Vercel deployment and direct ESP32-to-hosted-API
-  HTTPS connectivity remain unverified.
+- The user subsequently confirmed Vercel login and direct ESP32-to-cloud telemetry
+  while powered by a power bank. Read-only archive checks later showed low battery
+  voltage and an invalid bulb measurement. These are not certified hardware tests.
+- The new automation-switch behavior is verified locally in tests and simulation;
+  it still needs the new hosted deployment and a user-performed firmware upload
+  before it can be verified on the physical device.
 
 ## Still required before real operation
 
@@ -54,9 +73,9 @@ the agent.
    stated unfused jumper-wire battery circuit is not certified safe by these tests.
 2. Keep configured `.env` and firmware `secrets.h` ignored. Confirm the trusted root CA
    for the eventual HTTPS endpoint; no certificate-validation bypass is implemented.
-3. Deploy to Vercel using the configured Supabase PostgreSQL/operator login, then
-   verify the hosted deployment.
-4. Update and upload the firmware for the hosted HTTPS endpoint yourself, initially
+3. Deploy the new switch-enabled backend/frontend to the existing Vercel project,
+   then verify the hosted deployment. Keep existing environment variables.
+4. Upload the new switch-enabled firmware for the hosted HTTPS endpoint yourself, initially
    with battery/panel disconnected and `ENABLE_LOAD_OUTPUTS=false`. Verify battery
    and per-load telemetry using an appropriately protected setup before enabling outputs.
 5. Verify real relay commands/interlocks with appropriate electrical protection.

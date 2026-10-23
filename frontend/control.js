@@ -56,6 +56,7 @@ function showDashboard() {
   $('dashboard').hidden = false;
   $('loginPanel').hidden = true;
   $('logout').hidden = config.auth === 'demo';
+  notice('');
 }
 
 function onlineNow() {
@@ -64,12 +65,34 @@ function onlineNow() {
 
 function updateControls() {
   const online = onlineNow();
+  const modePending = pendingLoads.has('automation') || liveData?.commands?.some(c => c.load === 'automation' && ['queued', 'delivered'].includes(c.status));
   for (const load of ['bulb', 'fan']) {
     const branch = liveData?.latest?.[load];
     const pending = pendingLoads.has(load) || liveData?.commands?.some(c => c.load === load && ['queued', 'delivered'].includes(c.status));
-    $(load + 'On').disabled = !online || !branch || Boolean(branch.blocked_reason) || branch.on || pending;
+    $(load + 'On').disabled = !online || !branch || Boolean(branch.blocked_reason) || branch.on || pending || modePending;
     // OFF stays available while an ON is pending, allowing it to supersede the request.
     $(load + 'Off').disabled = !online || !branch;
+  }
+  const automatic = liveData?.latest?.automatic_protection;
+  const supported = typeof automatic === 'boolean' && Boolean(liveData?.latest?.mode_revision);
+  $('automationSwitch').disabled = !online || !supported || modePending;
+  $('automationSwitch').setAttribute('aria-checked', automatic === false ? 'false' : 'true');
+  $('automationValue').textContent = !supported ? 'Unavailable' : automatic ? 'ON · Automatic' : 'OFF · Manual';
+  $('manualWarning').hidden = automatic !== false;
+  $('policyTitle').textContent = automatic === false ? 'Manual battery override active' : 'Battery-first fan protection';
+  $('policyDescription').textContent = automatic === false ?
+    'Low-voltage and fan SOC rules are bypassed. Sensor, temperature, current and overvoltage checks remain.' :
+    'Automatic mode: fan locks below 50% estimated SOC. Recovery at 55%; a fresh ON request is required.';
+  $('automationSwitch').closest('.automation-panel').classList.toggle('manual-mode', automatic === false);
+  $('automationStatus').textContent = !liveData?.latest ? 'Waiting for the ESP32\'s confirmed mode.' :
+    !supported ? 'Update and upload the ESP32 firmware to use this switch.' :
+    !online ? 'Device offline. The last confirmed mode is shown; no change can be sent.' :
+    modePending ? 'Mode change pending. Waiting for ESP32 confirmation; new ON requests are paused.' :
+    automatic ? 'ESP32 confirmed Automatic ON. Battery rules apply locally, even without Wi-Fi.' :
+    'ESP32 confirmed Automatic OFF. Battery rules are bypassed; other checks remain active.';
+  if (!pendingLoads.has('automation')) {
+    const modeRequest = liveData?.commands?.find(c => c.load === 'automation');
+    $('automationCommand').textContent = modeRequest ? 'Last mode request: ' + modeRequest.status + (modeRequest.reason ? ' · ' + pretty(modeRequest.reason) : '') : '';
   }
   if (liveData) {
     $('connection').textContent = config.mode === 'demo' ? 'Simulation' : online ? 'Device online' : 'Device offline';
@@ -103,7 +126,7 @@ function renderLive() {
   $('commands').replaceChildren();
   for (const c of liveData.commands) {
     const row = document.createElement('tr');
-    for (const value of [new Date(c.created_at * 1000).toLocaleTimeString(), `${c.load} ${c.on ? 'ON' : 'OFF'}`, c.status]) {
+    for (const value of [new Date(c.created_at * 1000).toLocaleTimeString(), `${c.load === 'automation' ? 'Automatic protection' : c.load} ${c.on ? 'ON' : 'OFF'}`, c.status]) {
       const cell = document.createElement('td'); cell.textContent = value; row.append(cell);
     }
     if (c.reason) { const detail = document.createElement('span'); detail.className = 'command-detail'; detail.textContent = c.reason; row.lastChild.append(detail); }
@@ -123,6 +146,7 @@ async function refreshLive() {
     liveData = await api('/api/live');
     renderLive();
   } catch (error) {
+    if ($('dashboard').hidden) return;
     if (liveData) liveData.online = false;
     updateControls();
     $('connection').textContent = 'Connection unavailable';
@@ -186,7 +210,7 @@ async function refreshHistory() {
     const voltageRange = volts.length ? [Math.max(0, Math.min(...volts) - .1), Math.max(...volts) + .1] : null;
     drawChart('voltageChart', d.points, ['battery_voltage'], ['#a6bded'], d.start, d.end, voltageRange);
     renderActivity();
-  } catch (error) { notice('History: ' + error.message); }
+  } catch (error) { if (!$('dashboard').hidden) notice('History: ' + error.message); }
 }
 
 async function command(load, on) {
@@ -200,7 +224,8 @@ async function command(load, on) {
   try {
     const result = await api('/api/commands', {method: 'POST', body: JSON.stringify({request_id: requestId, load, on})});
     $(load + 'Command').textContent = 'Request ' + result.status;
-    notice(config.mode === 'demo' ? 'Simulation request queued. No physical hardware is controlled.' : 'Request queued; waiting for ESP32 acknowledgement.');
+    notice(config.mode === 'demo' ? 'Simulation request queued. No physical hardware is controlled.' :
+      load === 'automation' ? 'Mode change queued. The switch updates only after ESP32 confirmation.' : 'Request queued; waiting for ESP32 acknowledgement.');
   } catch (error) { $(load + 'Command').textContent = 'Request not confirmed'; notice(error.message); }
   finally { pendingLoads.delete(load); await refreshLive(); updateControls(); }
 }
@@ -213,6 +238,10 @@ $('loginForm').addEventListener('submit', async event => {
   finally {busy = false;}
 });
 $('logout').addEventListener('click', async () => {try {await api('/api/logout', {method: 'POST'}); showLogin();} catch (error) {notice(error.message);}});
+$('automationSwitch').addEventListener('click', () => {
+  const automatic = liveData?.latest?.automatic_protection;
+  if (typeof automatic === 'boolean' && !$('automationSwitch').disabled) command('automation', !automatic);
+});
 for (const load of ['bulb', 'fan']) {$(load + 'On').addEventListener('click', () => command(load, true)); $(load + 'Off').addEventListener('click', () => command(load, false));}
 $('period').addEventListener('change', () => {activityLimit = 12; $('export').href = '/api/export.csv?period=' + $('period').value; refreshHistory();});
 $('print').addEventListener('click', () => window.print());
